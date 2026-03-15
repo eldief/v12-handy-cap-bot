@@ -64,6 +64,11 @@ func main() {
 		mu.RLock()
 		defer mu.RUnlock()
 
+		if name == "" {
+			ratios, globalRatio := caps.ComputeAllCapRatios(latestCaps, latestAssets)
+			return telegram.FormatCapRatios(ratios, globalRatio)
+		}
+
 		if strings.ToLower(name) == "global" {
 			ratio := caps.GetGlobalCapUsageRatio(latestCaps)
 			return telegram.FormatGlobalCap(ratio)

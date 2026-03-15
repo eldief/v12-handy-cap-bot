@@ -89,12 +89,11 @@ func (t *Bot) handleCapCommand(msg *tgbotapi.Message) {
 	}
 
 	args := strings.Fields(msg.CommandArguments())
-	if len(args) == 0 {
-		t.reply(msg.Chat.ID, msg.MessageID, "Usage: `/cap <name> [put/call]`")
-		return
-	}
 
-	name := args[0]
+	name := ""
+	if len(args) > 0 {
+		name = args[0]
+	}
 	var isPut *bool
 
 	if len(args) >= 2 {
@@ -186,19 +185,9 @@ func FormatCapRatios(ratios []model.AssetCapRatio, globalRatio float64) string {
 
 	var b strings.Builder
 	b.WriteString("*Rysk v12 Caps*\n\n")
-	fmt.Fprintf(&b, "Global: `%.2f%%`\n\n", globalRatio)
+	fmt.Fprintf(&b, "%s Global: `%.2f%%`\n\n", ratioEmoji(globalRatio), globalRatio)
 
-	for _, r := range ratios {
-		dir := "Call"
-		if r.IsPut {
-			dir = "Put"
-		}
-		fmt.Fprintf(&b, "`%-8s` %s  `%.2f%%`\n",
-			EscMD(r.Asset.Symbol),
-			EscMD(dir),
-			r.Ratio,
-		)
-	}
+	writeGroupedRatios(&b, ratios)
 
 	return b.String()
 }
@@ -212,24 +201,85 @@ func FormatSingleCapRatio(name string, ratios []model.AssetCapRatio) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "*Cap: %s*\n\n", EscMD(name))
 
-	for _, r := range ratios {
-		dir := "Call"
-		if r.IsPut {
-			dir = "Put"
-		}
-		fmt.Fprintf(&b, "`%-8s` %s  `%.2f%%`\n",
-			EscMD(r.Asset.Symbol),
-			EscMD(dir),
-			r.Ratio,
-		)
-	}
+	writeGroupedRatios(&b, ratios)
 
 	return b.String()
 }
 
 // FormatGlobalCap formats the global cap ratio.
 func FormatGlobalCap(ratio float64) string {
-	return fmt.Sprintf("*Global Cap*\n\n`%.2f%%`", ratio)
+	return fmt.Sprintf("*Global Cap*\n\n%s `%.2f%%`", ratioEmoji(ratio), ratio)
+}
+
+// assetGroup holds Call and Put ratios for a single asset.
+type assetGroup struct {
+	symbol   string
+	callPct  float64
+	putPct   float64
+	hasCall  bool
+	hasPut   bool
+}
+
+func groupRatios(ratios []model.AssetCapRatio) []assetGroup {
+	order := []string{}
+	groups := make(map[string]*assetGroup)
+
+	for _, r := range ratios {
+		key := r.Asset.Address
+		g, exists := groups[key]
+		if !exists {
+			g = &assetGroup{symbol: r.Asset.Symbol}
+			groups[key] = g
+			order = append(order, key)
+		}
+		if r.IsPut {
+			g.putPct = r.Ratio
+			g.hasPut = true
+		} else {
+			g.callPct = r.Ratio
+			g.hasCall = true
+		}
+	}
+
+	result := make([]assetGroup, 0, len(order))
+	for _, key := range order {
+		result = append(result, *groups[key])
+	}
+	return result
+}
+
+func writeGroupedRatios(b *strings.Builder, ratios []model.AssetCapRatio) {
+	for _, g := range groupRatios(ratios) {
+		maxRatio := g.callPct
+		if g.putPct > maxRatio {
+			maxRatio = g.putPct
+		}
+
+		emoji := ratioEmoji(maxRatio)
+
+		switch {
+		case g.hasCall && g.hasPut:
+			fmt.Fprintf(b, "%s `%-6s` Call `%.2f%%` \\| Put `%.2f%%`\n",
+				emoji, EscMD(g.symbol), g.callPct, g.putPct)
+		case g.hasCall:
+			fmt.Fprintf(b, "%s `%-6s` Call `%.2f%%`\n",
+				emoji, EscMD(g.symbol), g.callPct)
+		case g.hasPut:
+			fmt.Fprintf(b, "%s `%-6s` Put `%.2f%%`\n",
+				emoji, EscMD(g.symbol), g.putPct)
+		}
+	}
+}
+
+func ratioEmoji(pct float64) string {
+	switch {
+	case pct >= 80:
+		return "\xf0\x9f\x94\xb4" // 🔴
+	case pct >= 50:
+		return "\xf0\x9f\x9f\xa1" // 🟡
+	default:
+		return "\xf0\x9f\x9f\xa2" // 🟢
+	}
 }
 
 // FormatFreedCaps formats a notification about freed caps using the same
@@ -284,17 +334,7 @@ func FormatFreedCaps(freed []model.FreedCap, capData []model.SLCapsStatus, asset
 	var b strings.Builder
 	b.WriteString("*Cap Freed\\!*\n\n")
 
-	for _, r := range ratios {
-		dir := "Call"
-		if r.IsPut {
-			dir = "Put"
-		}
-		fmt.Fprintf(&b, "`%-8s` %s  `%.2f%%`\n",
-			EscMD(r.Asset.Symbol),
-			EscMD(dir),
-			r.Ratio,
-		)
-	}
+	writeGroupedRatios(&b, ratios)
 
 	return b.String()
 }
