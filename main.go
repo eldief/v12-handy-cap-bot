@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -65,13 +64,8 @@ func main() {
 		defer mu.RUnlock()
 
 		if name == "" {
-			ratios, globalRatio := caps.ComputeAllCapRatios(latestCaps, latestAssets)
-			return telegram.FormatCapRatios(ratios, globalRatio)
-		}
-
-		if strings.ToLower(name) == "global" {
-			ratio := caps.GetGlobalCapUsageRatio(latestCaps)
-			return telegram.FormatGlobalCap(ratio)
+			ratios, _ := caps.ComputeAllCapRatios(latestCaps, latestAssets)
+			return telegram.FormatCapRatios(ratios)
 		}
 
 		assets := caps.FindAssetsByName(latestAssets, name)

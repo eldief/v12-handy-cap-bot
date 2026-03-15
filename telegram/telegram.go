@@ -144,8 +144,8 @@ func (t *Bot) removeChat(chatID int64) {
 	t.store.Save(t.chats)
 }
 
-func (t *Bot) BroadcastCapRatios(ratios []model.AssetCapRatio, globalRatio float64) {
-	msg := FormatCapRatios(ratios, globalRatio)
+func (t *Bot) BroadcastCapRatios(ratios []model.AssetCapRatio) {
+	msg := FormatCapRatios(ratios)
 	if msg == "" {
 		return
 	}
@@ -178,14 +178,13 @@ func isChatGone(err error) bool {
 		strings.Contains(s, "bot was kicked")
 }
 
-func FormatCapRatios(ratios []model.AssetCapRatio, globalRatio float64) string {
+func FormatCapRatios(ratios []model.AssetCapRatio) string {
 	if len(ratios) == 0 {
 		return ""
 	}
 
 	var b strings.Builder
 	b.WriteString("*Rysk v12 Caps*\n\n")
-	fmt.Fprintf(&b, "%s Global: `%.2f%%`\n\n", ratioEmoji(globalRatio), globalRatio)
 
 	writeGroupedRatios(&b, ratios)
 
@@ -206,10 +205,6 @@ func FormatSingleCapRatio(name string, ratios []model.AssetCapRatio) string {
 	return b.String()
 }
 
-// FormatGlobalCap formats the global cap ratio.
-func FormatGlobalCap(ratio float64) string {
-	return fmt.Sprintf("*Global Cap*\n\n%s `%.2f%%`", ratioEmoji(ratio), ratio)
-}
 
 // assetGroup holds Call and Put ratios for a single asset.
 type assetGroup struct {
@@ -249,25 +244,59 @@ func groupRatios(ratios []model.AssetCapRatio) []assetGroup {
 }
 
 func writeGroupedRatios(b *strings.Builder, ratios []model.AssetCapRatio) {
-	for _, g := range groupRatios(ratios) {
+	groups := groupRatios(ratios)
+	if len(groups) == 0 {
+		return
+	}
+
+	// Header row
+	hasAnyCall := false
+	hasAnyPut := false
+	for _, g := range groups {
+		if g.hasCall {
+			hasAnyCall = true
+		}
+		if g.hasPut {
+			hasAnyPut = true
+		}
+	}
+
+	header := "`            "
+	if hasAnyCall {
+		header += "  Call    "
+	}
+	if hasAnyPut {
+		header += "  Put     "
+	}
+	header += "`\n"
+	b.WriteString(header)
+
+	for _, g := range groups {
 		maxRatio := g.callPct
 		if g.putPct > maxRatio {
 			maxRatio = g.putPct
 		}
 
 		emoji := ratioEmoji(maxRatio)
+		line := fmt.Sprintf("%s  `%-8s", emoji, EscMD(g.symbol))
 
-		switch {
-		case g.hasCall && g.hasPut:
-			fmt.Fprintf(b, "%s `%-6s` Call `%.2f%%` \\| Put `%.2f%%`\n",
-				emoji, EscMD(g.symbol), g.callPct, g.putPct)
-		case g.hasCall:
-			fmt.Fprintf(b, "%s `%-6s` Call `%.2f%%`\n",
-				emoji, EscMD(g.symbol), g.callPct)
-		case g.hasPut:
-			fmt.Fprintf(b, "%s `%-6s` Put `%.2f%%`\n",
-				emoji, EscMD(g.symbol), g.putPct)
+		if hasAnyCall {
+			if g.hasCall {
+				line += fmt.Sprintf("  %6.2f%%", g.callPct)
+			} else {
+				line += "      -  "
+			}
 		}
+		if hasAnyPut {
+			if g.hasPut {
+				line += fmt.Sprintf("  %6.2f%%", g.putPct)
+			} else {
+				line += "      -  "
+			}
+		}
+
+		line += "`\n"
+		b.WriteString(line)
 	}
 }
 

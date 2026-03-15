@@ -16,7 +16,7 @@ var testAsset = &model.AssetsResponse{
 }
 
 func TestFormatCapRatios_Empty(t *testing.T) {
-	result := FormatCapRatios(nil, 0)
+	result := FormatCapRatios(nil)
 	if result != "" {
 		t.Error("expected empty string for nil ratios")
 	}
@@ -27,13 +27,10 @@ func TestFormatCapRatios_Basic(t *testing.T) {
 		{Asset: testAsset, IsPut: false, Ratio: 50.0},
 		{Asset: testAsset, IsPut: true, Ratio: 40.0},
 	}
-	result := FormatCapRatios(ratios, 25.0)
+	result := FormatCapRatios(ratios)
 
 	if !strings.Contains(result, "Rysk v12 Caps") {
 		t.Error("expected header")
-	}
-	if !strings.Contains(result, "25.00%") {
-		t.Error("expected global ratio")
 	}
 	if !strings.Contains(result, "50.00%") {
 		t.Error("expected call ratio")
@@ -202,25 +199,6 @@ func TestFormatFreedCaps_DeduplicatesSameAsset(t *testing.T) {
 	count := strings.Count(result, "UETH")
 	if count != 1 {
 		t.Errorf("expected 1 UETH entry (deduplicated), got %d", count)
-	}
-}
-
-// --- FormatGlobalCap ---
-
-func TestFormatGlobalCap_ZeroPercent(t *testing.T) {
-	result := FormatGlobalCap(0)
-	if !strings.Contains(result, "0.00%") {
-		t.Errorf("expected 0.00%%, got %s", result)
-	}
-	if !strings.Contains(result, "Global Cap") {
-		t.Error("expected header")
-	}
-}
-
-func TestFormatGlobalCap_HundredPercent(t *testing.T) {
-	result := FormatGlobalCap(100)
-	if !strings.Contains(result, "100.00%") {
-		t.Errorf("expected 100.00%%, got %s", result)
 	}
 }
 
