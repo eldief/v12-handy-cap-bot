@@ -249,11 +249,6 @@ func FormatFreedCaps(freed []model.FreedCap, capData []model.SLCapsStatus, asset
 
 	for _, f := range freed {
 		addr, isPut := parseFreedName(f.Name)
-		key := fmt.Sprintf("%s-%t", addr, isPut)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
 
 		asset := caps.FindAssetByAddress(assets, addr)
 		if asset == nil {
@@ -262,6 +257,13 @@ func FormatFreedCaps(freed []model.FreedCap, capData []model.SLCapsStatus, asset
 		if asset == nil {
 			continue
 		}
+
+		key := fmt.Sprintf("%s-%t", asset.Address, isPut)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
 		entries = append(entries, assetDir{asset: asset, isPut: isPut})
 	}
 
