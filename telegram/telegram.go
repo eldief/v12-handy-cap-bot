@@ -8,6 +8,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"v12-handy-cap-bot/caps"
 	"v12-handy-cap-bot/chatstore"
 	"v12-handy-cap-bot/model"
 )
@@ -231,28 +232,86 @@ func FormatGlobalCap(ratio float64) string {
 	return fmt.Sprintf("*Global Cap*\n\n`%.2f%%`", ratio)
 }
 
-// FormatFreedCaps formats a notification about freed caps.
-func FormatFreedCaps(freed []model.FreedCap) string {
+// FormatFreedCaps formats a notification about freed caps using the same
+// layout as /cap responses: asset symbol, direction, and current usage ratio.
+func FormatFreedCaps(freed []model.FreedCap, capData []model.SLCapsStatus, assets map[int][]*model.AssetsResponse) string {
 	if len(freed) == 0 {
 		return ""
+	}
+
+	// Deduplicate by asset address — multiple cap types may fire for the same asset.
+	type assetDir struct {
+		asset *model.AssetsResponse
+		isPut bool
+	}
+	seen := make(map[string]bool)
+	var entries []assetDir
+
+	for _, f := range freed {
+		addr, isPut := parseFreedName(f.Name)
+		key := fmt.Sprintf("%s-%t", addr, isPut)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		asset := caps.FindAssetByAddress(assets, addr)
+		if asset == nil {
+			asset = caps.FindAssetByUnderlying(assets, addr)
+		}
+		if asset == nil {
+			continue
+		}
+		entries = append(entries, assetDir{asset: asset, isPut: isPut})
+	}
+
+	if len(entries) == 0 {
+		return ""
+	}
+
+	var ratios []model.AssetCapRatio
+	for _, e := range entries {
+		ratio := caps.GetCapUsageRatio(capData, e.asset, e.isPut)
+		ratios = append(ratios, model.AssetCapRatio{
+			Asset: e.asset,
+			IsPut: e.isPut,
+			Ratio: ratio,
+		})
 	}
 
 	var b strings.Builder
 	b.WriteString("*Cap Freed\\!*\n\n")
 
-	for _, f := range freed {
-		fmt.Fprintf(&b, "`%s` \\(%s\\)\n",
-			EscMD(f.Name),
-			EscMD(f.Type),
+	for _, r := range ratios {
+		dir := "Call"
+		if r.IsPut {
+			dir = "Put"
+		}
+		fmt.Fprintf(&b, "`%-8s` %s  `%.2f%%`\n",
+			EscMD(r.Asset.Symbol),
+			EscMD(dir),
+			r.Ratio,
 		)
 	}
 
 	return b.String()
 }
 
+// parseFreedName extracts the address and direction from a FreedCap.Name
+// which may be "0xaddr", "0xaddr-false", "0xaddr-true", or an underlying name.
+func parseFreedName(name string) (addr string, isPut bool) {
+	if rest, ok := strings.CutSuffix(name, "-true"); ok {
+		return rest, true
+	}
+	if rest, ok := strings.CutSuffix(name, "-false"); ok {
+		return rest, false
+	}
+	return name, false
+}
+
 // BroadcastFreedCaps sends a notification about freed caps to all chats.
-func (t *Bot) BroadcastFreedCaps(freed []model.FreedCap) {
-	msg := FormatFreedCaps(freed)
+func (t *Bot) BroadcastFreedCaps(freed []model.FreedCap, capData []model.SLCapsStatus, assets map[int][]*model.AssetsResponse) {
+	msg := FormatFreedCaps(freed, capData, assets)
 	if msg == "" {
 		return
 	}

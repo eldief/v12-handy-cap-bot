@@ -42,7 +42,11 @@ func main() {
 	}
 
 	// --- Telegram bot ---
-	store := chatstore.NewChatStore("chats.txt")
+	chatPath := os.Getenv("CHAT_STORE_PATH")
+	if chatPath == "" {
+		chatPath = "chats.txt"
+	}
+	store := chatstore.NewChatStore(chatPath)
 	tg, err := telegram.NewBot(token, store)
 	if err != nil {
 		log.Fatalf("telegram: %v", err)
@@ -131,7 +135,10 @@ func main() {
 		mu.Unlock()
 
 		if freed := tracker.Update(capData); len(freed) > 0 {
-			tg.BroadcastFreedCaps(freed)
+			mu.RLock()
+			assets := latestAssets
+			mu.RUnlock()
+			tg.BroadcastFreedCaps(freed, capData, assets)
 		}
 	}
 
