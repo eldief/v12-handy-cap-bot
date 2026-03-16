@@ -258,6 +258,9 @@ func FindAssetByAddress(assets map[int][]*model.AssetsResponse, address string) 
 	addr := strings.ToLower(address)
 	for _, assetList := range assets {
 		for _, a := range assetList {
+			if !a.Active {
+				continue
+			}
 			if strings.ToLower(a.Address) == addr {
 				return a
 			}
@@ -271,6 +274,9 @@ func FindAssetByAddress(assets map[int][]*model.AssetsResponse, address string) 
 func FindAssetByUnderlying(assets map[int][]*model.AssetsResponse, underlying string) *model.AssetsResponse {
 	for _, assetList := range assets {
 		for _, a := range assetList {
+			if !a.Active {
+				continue
+			}
 			if a.Underlying == underlying {
 				return a
 			}
