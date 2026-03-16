@@ -267,7 +267,7 @@ func TestFindAssetsByName_NotFound(t *testing.T) {
 // --- FreedCapsTracker ---
 
 func TestTracker_FirstUpdateNoAlert(t *testing.T) {
-	tracker := NewFreedCapsTracker(0) // 0 debounce for instant tests
+	tracker := NewFreedCapsTracker(0)
 	caps := []model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "500"},
 	}
@@ -277,61 +277,60 @@ func TestTracker_FirstUpdateNoAlert(t *testing.T) {
 	}
 }
 
-func TestTracker_DebounceWaitsBeforeAlert(t *testing.T) {
+func TestTracker_WindowWaitsBeforeFlush(t *testing.T) {
 	tracker := NewFreedCapsTracker(50 * time.Millisecond)
 
 	tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "500"},
 	})
 
-	// Decrease — should NOT alert yet (debouncing)
+	// Decrease — should NOT flush yet (window still open)
 	freed := tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "300"},
 	})
 	if len(freed) != 0 {
-		t.Errorf("expected 0 during debounce, got %d", len(freed))
+		t.Errorf("expected 0 during window, got %d", len(freed))
 	}
 
-	// Wait for debounce to expire
+	// Wait for window to expire
 	time.Sleep(60 * time.Millisecond)
 
-	// Same value — debounce expired, should fire now
+	// Window expired — should flush
 	freed = tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "300"},
 	})
 	if len(freed) != 1 {
-		t.Fatalf("expected 1 after debounce, got %d", len(freed))
+		t.Fatalf("expected 1 after window, got %d", len(freed))
 	}
 	if freed[0].OldUsage != "500" || freed[0].NewUsage != "300" {
 		t.Errorf("unexpected freed: %+v", freed[0])
 	}
 }
 
-func TestTracker_FurtherDecreaseResetsDebounce(t *testing.T) {
+func TestTracker_FurtherDecreaseWithinWindow(t *testing.T) {
 	tracker := NewFreedCapsTracker(50 * time.Millisecond)
 
 	tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "500"},
 	})
 
-	// First decrease
+	// First decrease — starts window
 	tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "400"},
 	})
 
-	time.Sleep(30 * time.Millisecond)
-
-	// Further decrease before debounce expires — resets timer
+	// Further decrease within same window — updates last usage
 	freed := tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "200"},
 	})
 	if len(freed) != 0 {
-		t.Errorf("expected 0 during debounce reset, got %d", len(freed))
+		t.Errorf("expected 0 during window, got %d", len(freed))
 	}
 
+	// Wait for window to expire
 	time.Sleep(60 * time.Millisecond)
 
-	// Debounce expired — should fire with original start and final value
+	// Should fire with original start and final lowest value
 	freed = tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "200"},
 	})
@@ -343,35 +342,32 @@ func TestTracker_FurtherDecreaseResetsDebounce(t *testing.T) {
 	}
 }
 
-func TestTracker_IncreaseResetsDebounce(t *testing.T) {
-	tracker := NewFreedCapsTracker(0)
+func TestTracker_IncreaseCancelsPending(t *testing.T) {
+	tracker := NewFreedCapsTracker(50 * time.Millisecond)
 
 	tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "500"},
 	})
 
-	// Decrease — fires immediately with 0 debounce
-	freed := tracker.Update([]model.SLCapsStatus{
+	// Decrease — starts window
+	tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "300"},
 	})
-	if len(freed) != 1 {
-		t.Fatalf("expected 1 on decrease, got %d", len(freed))
-	}
 
-	// Increase — no alert
-	freed = tracker.Update([]model.SLCapsStatus{
+	// Increase — cancels the pending entry
+	tracker.Update([]model.SLCapsStatus{
+		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "600"},
+	})
+
+	// Wait for window to expire
+	time.Sleep(60 * time.Millisecond)
+
+	// No pending entries left — nothing to flush
+	freed := tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "600"},
 	})
 	if len(freed) != 0 {
-		t.Errorf("expected 0 on increase, got %d", len(freed))
-	}
-
-	// New decrease — should fire again
-	freed = tracker.Update([]model.SLCapsStatus{
-		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "400"},
-	})
-	if len(freed) != 1 {
-		t.Errorf("expected 1 after reset+decrease, got %d", len(freed))
+		t.Errorf("expected 0 after increase cancelled pending, got %d", len(freed))
 	}
 }
 
@@ -390,19 +386,20 @@ func TestTracker_IncreasedUsageNoAlert(t *testing.T) {
 	}
 }
 
-func TestTracker_ZeroDebounceFiresImmediately(t *testing.T) {
+func TestTracker_ZeroWindowFlushesOnNextUpdate(t *testing.T) {
 	tracker := NewFreedCapsTracker(0)
 
 	tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "500"},
 	})
 
-	// Decrease — with 0 debounce, fires in same Update call
+	// Decrease — starts window (window=0 so it's already expired)
+	// But flush check happens after processing, so this should fire
 	freed := tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "300"},
 	})
 	if len(freed) != 1 {
-		t.Fatalf("expected 1 immediately with 0 debounce, got %d", len(freed))
+		t.Fatalf("expected 1 with 0 window, got %d", len(freed))
 	}
 
 	// No more alerts for same value
@@ -410,7 +407,51 @@ func TestTracker_ZeroDebounceFiresImmediately(t *testing.T) {
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "300"},
 	})
 	if len(freed) != 0 {
-		t.Errorf("expected 0 after already fired, got %d", len(freed))
+		t.Errorf("expected 0 after already flushed, got %d", len(freed))
+	}
+}
+
+func TestTracker_BatchesMultipleCapsInOneWindow(t *testing.T) {
+	tracker := NewFreedCapsTracker(50 * time.Millisecond)
+
+	// Seed both caps
+	tracker.Update([]model.SLCapsStatus{
+		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "500"},
+		{Name: "BTC", Type: "NOTIONAL", Cap: "2000", Usage: "1000"},
+	})
+
+	// Both decrease at different times within the window
+	tracker.Update([]model.SLCapsStatus{
+		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "300"},
+		{Name: "BTC", Type: "NOTIONAL", Cap: "2000", Usage: "1000"},
+	})
+
+	time.Sleep(20 * time.Millisecond)
+
+	tracker.Update([]model.SLCapsStatus{
+		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "300"},
+		{Name: "BTC", Type: "NOTIONAL", Cap: "2000", Usage: "600"},
+	})
+
+	// Window not expired yet
+	freed := tracker.Update([]model.SLCapsStatus{
+		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "300"},
+		{Name: "BTC", Type: "NOTIONAL", Cap: "2000", Usage: "600"},
+	})
+	if len(freed) != 0 {
+		t.Errorf("expected 0 during window, got %d", len(freed))
+	}
+
+	// Wait for window to expire
+	time.Sleep(40 * time.Millisecond)
+
+	// Both should flush together in one batch
+	freed = tracker.Update([]model.SLCapsStatus{
+		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "300"},
+		{Name: "BTC", Type: "NOTIONAL", Cap: "2000", Usage: "600"},
+	})
+	if len(freed) != 2 {
+		t.Fatalf("expected 2 in single batch, got %d", len(freed))
 	}
 }
 
@@ -435,17 +476,17 @@ func TestFindAssetByAddress(t *testing.T) {
 	}
 }
 
-func TestFindAssetByUnderlying(t *testing.T) {
+func TestFindAssetsByUnderlying(t *testing.T) {
 	assets := map[int][]*model.AssetsResponse{999: {testAsset}}
 
-	a := FindAssetByUnderlying(assets, "ETH")
-	if a == nil || a.Symbol != "UETH" {
+	found := FindAssetsByUnderlying(assets, "ETH")
+	if len(found) != 1 || found[0].Symbol != "UETH" {
 		t.Error("expected to find UETH by underlying")
 	}
 
-	a = FindAssetByUnderlying(assets, "NONEXISTENT")
-	if a != nil {
-		t.Error("expected nil for nonexistent underlying")
+	found = FindAssetsByUnderlying(assets, "NONEXISTENT")
+	if len(found) != 0 {
+		t.Error("expected empty for nonexistent underlying")
 	}
 }
 
@@ -480,13 +521,13 @@ func TestTracker_EmptyCapsSlice(t *testing.T) {
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "500"},
 	})
 
-	// Empty update should not lose pending or panic
+	// Empty update should not lose state or panic
 	freed := tracker.Update(nil)
 	if len(freed) != 0 {
 		t.Errorf("expected 0, got %d", len(freed))
 	}
 
-	// Previous state should still be intact
+	// Previous state should still be intact — decrease fires with 0 window
 	freed = tracker.Update([]model.SLCapsStatus{
 		{Name: "ETH", Type: "CONTRACTS", Cap: "1000", Usage: "300"},
 	})
@@ -534,22 +575,18 @@ func TestTracker_MalformedKeyNoPipe(t *testing.T) {
 	tracker := NewFreedCapsTracker(0)
 
 	// Manually inject a pending entry with a key that has no pipe
+	// and set windowStart so the window is already expired
 	tracker.lastUsage["nopipe"] = big.NewInt(500)
 	tracker.pending["nopipe"] = &pendingFree{
 		startUsage: big.NewInt(500),
 		lastUsage:  big.NewInt(300),
 		cap:        "1000",
-		lastSeen:   time.Now().Add(-time.Hour),
 	}
+	tracker.windowStart = time.Now().Add(-time.Hour)
 
-	// Update should not panic; the malformed key should be cleaned up
+	// Update should not panic; the malformed key should be skipped
 	freed := tracker.Update(nil)
 	if len(freed) != 0 {
 		t.Errorf("expected 0 for malformed key, got %d", len(freed))
-	}
-
-	// pending should have been cleaned up
-	if _, exists := tracker.pending["nopipe"]; exists {
-		t.Error("expected malformed key to be deleted from pending")
 	}
 }

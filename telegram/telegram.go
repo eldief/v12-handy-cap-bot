@@ -327,23 +327,32 @@ func FormatFreedCaps(freed []model.FreedCap, capData []model.SLCapsStatus, asset
 	var entries []assetDir
 
 	for _, f := range freed {
-		addr, isPut := parseFreedName(f.Name)
+		addr, isPut, hasDir := parseFreedName(f.Name)
 
-		asset := caps.FindAssetByAddress(assets, addr)
-		if asset == nil {
-			asset = caps.FindAssetByUnderlying(assets, addr)
+		var matched []*model.AssetsResponse
+		if a := caps.FindAssetByAddress(assets, addr); a != nil {
+			matched = []*model.AssetsResponse{a}
+		} else {
+			matched = caps.FindAssetsByUnderlying(assets, addr)
 		}
-		if asset == nil {
+		if len(matched) == 0 {
 			continue
 		}
 
-		key := fmt.Sprintf("%s-%t", asset.Address, isPut)
-		if seen[key] {
-			continue
+		dirs := []bool{isPut}
+		if !hasDir {
+			dirs = []bool{false, true}
 		}
-		seen[key] = true
-
-		entries = append(entries, assetDir{asset: asset, isPut: isPut})
+		for _, asset := range matched {
+			for _, d := range dirs {
+				key := fmt.Sprintf("%s-%t", asset.Address, d)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				entries = append(entries, assetDir{asset: asset, isPut: d})
+			}
+		}
 	}
 
 	if len(entries) == 0 {
@@ -370,14 +379,15 @@ func FormatFreedCaps(freed []model.FreedCap, capData []model.SLCapsStatus, asset
 
 // parseFreedName extracts the address and direction from a FreedCap.Name
 // which may be "0xaddr", "0xaddr-false", "0xaddr-true", or an underlying name.
-func parseFreedName(name string) (addr string, isPut bool) {
+// When no direction suffix is present, hasDir is false meaning both directions apply.
+func parseFreedName(name string) (addr string, isPut bool, hasDir bool) {
 	if rest, ok := strings.CutSuffix(name, "-true"); ok {
-		return rest, true
+		return rest, true, true
 	}
 	if rest, ok := strings.CutSuffix(name, "-false"); ok {
-		return rest, false
+		return rest, false, true
 	}
-	return name, false
+	return name, false, false
 }
 
 // BroadcastFreedCaps sends a notification about freed caps to all chats.

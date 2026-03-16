@@ -112,7 +112,7 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	tracker := caps.NewFreedCapsTracker(30 * time.Second)
+	tracker := caps.NewFreedCapsTracker(1 * time.Minute)
 
 	poll := func() {
 		fetchedAssets, err := ws.FetchAssets()

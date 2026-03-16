@@ -14,33 +14,35 @@ var (
 	zero  = big.NewInt(0)
 )
 
-// pendingFree tracks a cap that is being debounced.
+// pendingFree tracks a cap that is being gathered.
 type pendingFree struct {
 	startUsage *big.Int // usage when decrease was first detected
 	lastUsage  *big.Int // latest (lowest) usage seen
 	cap        string
-	lastSeen   time.Time // last time a decrease was observed
 }
 
-// FreedCapsTracker debounces cap usage decreases. When usage drops, it waits
-// for a debounce period of no further decreases before reporting. This batches
-// multiple small decreases (e.g. from several transactions) into one notification.
+// FreedCapsTracker gathers cap usage decreases into a single batch.
+// Once the first decrease is detected a gathering window starts. All decreases
+// observed during that window are collected. When the window expires the entire
+// batch is flushed as one notification.
 type FreedCapsTracker struct {
-	debounce  time.Duration
+	window    time.Duration
 	lastUsage map[string]*big.Int
 	pending   map[string]*pendingFree
+	// windowStart is zero when no gathering is in progress.
+	windowStart time.Time
 }
 
-func NewFreedCapsTracker(debounce time.Duration) *FreedCapsTracker {
+func NewFreedCapsTracker(window time.Duration) *FreedCapsTracker {
 	return &FreedCapsTracker{
-		debounce:  debounce,
+		window:    window,
 		lastUsage: make(map[string]*big.Int),
 		pending:   make(map[string]*pendingFree),
 	}
 }
 
-// Update processes new caps data. It returns freed caps whose debounce window
-// has expired (usage stabilized for the debounce duration).
+// Update processes new caps data. It returns all gathered freed caps once the
+// gathering window (started from the first decrease) has elapsed.
 func (t *FreedCapsTracker) Update(caps []model.SLCapsStatus) []model.FreedCap {
 	now := time.Now()
 
@@ -55,49 +57,53 @@ func (t *FreedCapsTracker) Update(caps []model.SLCapsStatus) []model.FreedCap {
 		prev, hasPrev := t.lastUsage[key]
 
 		if hasPrev && currUsage.Cmp(prev) < 0 {
-			// Usage decreased
+			// Usage decreased — start window if not already running
+			if t.windowStart.IsZero() {
+				t.windowStart = now
+			}
+
 			p, exists := t.pending[key]
 			if exists {
 				// Already tracking — update to latest lower value
 				p.lastUsage = new(big.Int).Set(currUsage)
-				p.lastSeen = now
 			} else {
-				// Start debounce
 				t.pending[key] = &pendingFree{
 					startUsage: new(big.Int).Set(prev),
 					lastUsage:  new(big.Int).Set(currUsage),
 					cap:        c.Cap,
-					lastSeen:   now,
 				}
 			}
 		} else if hasPrev && currUsage.Cmp(prev) > 0 {
-			// Usage increased — cancel pending if any
+			// Usage increased — cancel this entry
 			delete(t.pending, key)
 		}
-		// If equal, keep pending as-is (still debouncing)
 
 		t.lastUsage[key] = new(big.Int).Set(currUsage)
 	}
 
-	// Collect entries whose debounce window has expired
+	// Flush everything once the gathering window expires
+	if t.windowStart.IsZero() || now.Sub(t.windowStart) < t.window {
+		return nil
+	}
+
 	var freed []model.FreedCap
 	for key, p := range t.pending {
-		if now.Sub(p.lastSeen) >= t.debounce {
-			parts := strings.SplitN(key, "|", 2)
-			if len(parts) < 2 {
-				delete(t.pending, key)
-				continue
-			}
-			freed = append(freed, model.FreedCap{
-				Name:     parts[0],
-				Type:     parts[1],
-				OldUsage: p.startUsage.String(),
-				NewUsage: p.lastUsage.String(),
-				Cap:      p.cap,
-			})
-			delete(t.pending, key)
+		parts := strings.SplitN(key, "|", 2)
+		if len(parts) < 2 {
+			continue
 		}
+		freed = append(freed, model.FreedCap{
+			Name:     parts[0],
+			Type:     parts[1],
+			OldUsage: p.startUsage.String(),
+			NewUsage: p.lastUsage.String(),
+			Cap:      p.cap,
+		})
 	}
+
+	// Reset for next gathering cycle
+	t.pending = make(map[string]*pendingFree)
+	t.windowStart = time.Time{}
 
 	return freed
 }
@@ -269,18 +275,19 @@ func FindAssetByAddress(assets map[int][]*model.AssetsResponse, address string) 
 	return nil
 }
 
-// FindAssetByUnderlying returns the first asset matching the given
+// FindAssetsByUnderlying returns all active assets matching the given
 // underlying across all chains.
-func FindAssetByUnderlying(assets map[int][]*model.AssetsResponse, underlying string) *model.AssetsResponse {
+func FindAssetsByUnderlying(assets map[int][]*model.AssetsResponse, underlying string) []*model.AssetsResponse {
+	var result []*model.AssetsResponse
 	for _, assetList := range assets {
 		for _, a := range assetList {
 			if !a.Active {
 				continue
 			}
 			if a.Underlying == underlying {
-				return a
+				result = append(result, a)
 			}
 		}
 	}
-	return nil
+	return result
 }
