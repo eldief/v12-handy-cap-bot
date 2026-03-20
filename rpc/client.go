@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"strconv"
 	"sync"
 	"time"
@@ -60,9 +61,7 @@ func (c *WSClient) GetAssets() map[int][]*model.AssetsResponse {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cp := make(map[int][]*model.AssetsResponse, len(c.assets))
-	for k, v := range c.assets {
-		cp[k] = v
-	}
+	maps.Copy(cp, c.assets)
 	return cp
 }
 
@@ -107,7 +106,7 @@ func (c *WSClient) Close() {
 	}
 }
 
-func (c *WSClient) rpcCall(method string) (json.RawMessage, error) {
+func (c *WSClient) rpcCall(method string, params ...any) (json.RawMessage, error) {
 	if err := c.limiter.Wait(context.Background()); err != nil {
 		return nil, fmt.Errorf("rate limit: %w", err)
 	}
@@ -116,6 +115,11 @@ func (c *WSClient) rpcCall(method string) (json.RawMessage, error) {
 		JsonRPC: "2.0",
 		ID:      uuid.NewString(),
 		Method:  method,
+	}
+	if len(params) == 1 {
+		req.Params = params[0]
+	} else if len(params) > 1 {
+		req.Params = params
 	}
 
 	c.mu.Lock()
@@ -153,6 +157,28 @@ func (c *WSClient) FetchCaps() ([]model.SLCapsStatus, error) {
 	}
 
 	return caps, nil
+}
+
+func (c *WSClient) FetchPositions(address string) ([]model.Trade, error) {
+	params := struct {
+		Address string `json:"address"`
+		ChainID int    `json:"chainId"`
+	}{
+		Address: address,
+		ChainID: 999,
+	}
+
+	result, err := c.rpcCall("positions", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var trades []model.Trade
+	if err := json.Unmarshal(result, &trades); err != nil {
+		return nil, fmt.Errorf("unmarshal positions: %w", err)
+	}
+
+	return trades, nil
 }
 
 func (c *WSClient) FetchAssets() (map[int][]*model.AssetsResponse, error) {

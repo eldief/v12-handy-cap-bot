@@ -45,6 +45,36 @@ type AssetsResponse struct {
 	Multipliers            json.RawMessage `json:"multipliers"`
 }
 
+// Trade represents an open position from the "positions" RPC method.
+type Trade struct {
+	Address    string `json:"address"`
+	APR        string `json:"apr"`
+	ChainID    int    `json:"chainId"`
+	CreatedAt  int    `json:"createdAt"`
+	Expiry     int    `json:"expiry"`
+	IsBuy      bool   `json:"isBuy"`
+	IsPut      bool   `json:"isPut"`
+	Quantity   string `json:"quantity"`
+	Strike     string `json:"strike"`
+	Price      string `json:"price"`
+	TxHash     string `json:"txHash"`
+	USD        string `json:"usd"`
+	Collateral string `json:"collateral"`
+	Fees       string `json:"fees"`
+	Status     string `json:"status"`
+	Symbol     string `json:"symbol"`
+	Premium    string `json:"premium"`
+}
+
+// EnrichedTrade wraps a Trade with additional data resolved from assets.
+type EnrichedTrade struct {
+	Trade
+	AssetSymbol      string
+	Underlying       string
+	CollateralSymbol string
+	MarketPrice      string
+}
+
 // AssetCapRatio holds the computed cap usage ratio for an asset+direction.
 type AssetCapRatio struct {
 	Asset *AssetsResponse

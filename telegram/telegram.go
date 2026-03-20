@@ -3,8 +3,11 @@ package telegram
 import (
 	"fmt"
 	"log"
+	"math/big"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -17,12 +20,16 @@ import (
 // name is the asset/underlying name, isPut is nil if no direction specified.
 type CapQueryFunc func(name string, isPut *bool) string
 
+// PositionsQueryFunc is called by the bot to resolve a /positions command.
+type PositionsQueryFunc func(address string) string
+
 type Bot struct {
-	bot      *tgbotapi.BotAPI
-	store    *chatstore.ChatStore
-	chats    map[int64]bool
-	mu       sync.RWMutex
-	onCapCmd CapQueryFunc
+	bot            *tgbotapi.BotAPI
+	store          *chatstore.ChatStore
+	chats          map[int64]bool
+	mu             sync.RWMutex
+	onCapCmd       CapQueryFunc
+	onPositionsCmd PositionsQueryFunc
 }
 
 func NewBot(token string, store *chatstore.ChatStore) (*Bot, error) {
@@ -42,6 +49,11 @@ func NewBot(token string, store *chatstore.ChatStore) (*Bot, error) {
 // SetCapHandler registers the callback for /cap commands.
 func (t *Bot) SetCapHandler(fn CapQueryFunc) {
 	t.onCapCmd = fn
+}
+
+// SetPositionsHandler registers the callback for /positions commands.
+func (t *Bot) SetPositionsHandler(fn PositionsQueryFunc) {
+	t.onPositionsCmd = fn
 }
 
 // ListenForUpdates processes incoming messages to track group membership and commands.
@@ -80,6 +92,8 @@ func (t *Bot) handleCommand(msg *tgbotapi.Message) {
 	switch msg.Command() {
 	case "cap":
 		t.handleCapCommand(msg)
+	case "positions":
+		t.handlePositionsCommand(msg)
 	}
 }
 
@@ -115,13 +129,83 @@ func (t *Bot) handleCapCommand(msg *tgbotapi.Message) {
 	t.reply(msg.Chat.ID, msg.MessageID, response)
 }
 
-func (t *Bot) reply(chatID int64, replyTo int, text string) {
-	tgMsg := tgbotapi.NewMessage(chatID, text)
-	tgMsg.ParseMode = "MarkdownV2"
-	tgMsg.ReplyToMessageID = replyTo
-	if _, err := t.bot.Send(tgMsg); err != nil {
-		log.Printf("telegram reply: %v", err)
+func (t *Bot) handlePositionsCommand(msg *tgbotapi.Message) {
+	if t.onPositionsCmd == nil {
+		return
 	}
+
+	args := strings.Fields(msg.CommandArguments())
+	if len(args) == 0 {
+		t.reply(msg.Chat.ID, msg.MessageID, "Usage: `/positions 0xAddress`")
+		return
+	}
+
+	address := args[0]
+	if !strings.HasPrefix(address, "0x") || len(address) != 42 {
+		t.reply(msg.Chat.ID, msg.MessageID, "Invalid address: `"+EscMD(address)+"`")
+		return
+	}
+
+	response := t.onPositionsCmd(address)
+	t.replyHTML(msg.Chat.ID, msg.MessageID, response)
+}
+
+const tgMaxLen = 4096
+
+func (t *Bot) replyHTML(chatID int64, replyTo int, text string) {
+	for _, chunk := range splitMessage(text, tgMaxLen) {
+		tgMsg := tgbotapi.NewMessage(chatID, chunk)
+		tgMsg.ParseMode = "HTML"
+		tgMsg.ReplyToMessageID = replyTo
+		if _, err := t.bot.Send(tgMsg); err != nil {
+			log.Printf("telegram reply: %v", err)
+		}
+		replyTo = 0
+	}
+}
+
+func (t *Bot) reply(chatID int64, replyTo int, text string) {
+	for _, chunk := range splitMessage(text, tgMaxLen) {
+		tgMsg := tgbotapi.NewMessage(chatID, chunk)
+		tgMsg.ParseMode = "MarkdownV2"
+		tgMsg.ReplyToMessageID = replyTo
+		if _, err := t.bot.Send(tgMsg); err != nil {
+			log.Printf("telegram reply: %v", err)
+		}
+		replyTo = 0 // only first chunk replies to the original message
+	}
+}
+
+// splitMessage splits text into chunks that fit within maxLen,
+// breaking at </pre> boundaries to keep code blocks intact.
+func splitMessage(text string, maxLen int) []string {
+	if len(text) <= maxLen {
+		return []string{text}
+	}
+
+	const blockEnd = "</pre>"
+
+	var chunks []string
+	for len(text) > 0 {
+		if len(text) <= maxLen {
+			chunks = append(chunks, text)
+			break
+		}
+
+		cut := strings.LastIndex(text[:maxLen], blockEnd)
+		if cut > 0 {
+			cut += len(blockEnd)
+		} else {
+			cut = strings.LastIndex(text[:maxLen], "\n")
+			if cut <= 0 {
+				cut = maxLen
+			}
+		}
+
+		chunks = append(chunks, strings.TrimSpace(text[:cut]))
+		text = strings.TrimSpace(text[cut:])
+	}
+	return chunks
 }
 
 func (t *Bot) addChat(chatID int64) {
@@ -415,6 +499,192 @@ func (t *Bot) BroadcastFreedCaps(freed []model.FreedCap, capData []model.SLCapsS
 			}
 		}
 	}
+}
+
+// FormatPositions formats enriched trades for a given address (HTML).
+func FormatPositions(address string, trades []model.EnrichedTrade) string {
+	if len(trades) == 0 {
+		return "<code>No positions for " + address + "</code>"
+	}
+
+	short := address[:6] + "..." + address[len(address)-4:]
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "<b>Positions: %s (%d open)</b>\n", short, len(trades))
+
+	for _, t := range trades {
+		symbol := t.AssetSymbol
+		if symbol == "" {
+			symbol = t.Symbol
+		}
+		if symbol == "" {
+			symbol = shortenAddr(t.Address)
+		}
+
+		usd := t.CollateralSymbol
+		if usd == "" {
+			usd = "USDC"
+		}
+
+		underlying := t.Underlying
+		if underlying == "" {
+			underlying = "?"
+		}
+
+		optType := "Call"
+		if t.IsPut {
+			optType = "Put"
+		}
+
+		status := strings.ToLower(t.Status)
+		if status == "" {
+			status = "open"
+		}
+
+		outcome := computeOutcome(t)
+
+		qty := formatBigNum(t.Quantity, 18)
+		strike := formatBigNum(t.Strike, 18)
+		curPrice := formatBigNum(t.MarketPrice, 18)
+		premium := formatBigNum(t.Premium, 18)
+		apr := t.APR
+		if apr == "" {
+			apr = "-"
+		}
+
+		fmt.Fprintf(&b, "\n<pre>")
+		fmt.Fprintf(&b, "%s/%s(%s)\n", symbol, usd, underlying)
+		fmt.Fprintf(&b, "Created: %s\n", formatExpiry(t.CreatedAt))
+		fmt.Fprintf(&b, "Qty:     %s\n", qty)
+		fmt.Fprintf(&b, "Type:    %s\n", optType)
+		fmt.Fprintf(&b, "Expiry:  %s\n", formatExpiry(t.Expiry))
+		fmt.Fprintf(&b, "Strike:  %s\n", strike)
+		fmt.Fprintf(&b, "Price:   %s\n", curPrice)
+		fmt.Fprintf(&b, "Premium: %s\n", premium)
+		fmt.Fprintf(&b, "APR:     %s\n", apr)
+		fmt.Fprintf(&b, "Status:  %s\n", status)
+		fmt.Fprintf(&b, "Outcome: %s", outcome)
+		fmt.Fprintf(&b, "</pre>")
+	}
+
+	return b.String()
+}
+
+// computeOutcome returns "ITM" or "OTM" by comparing strike vs market price.
+func computeOutcome(t model.EnrichedTrade) string {
+	if t.MarketPrice == "" || t.Strike == "" {
+		return "-"
+	}
+
+	market, ok1 := new(big.Int).SetString(t.MarketPrice, 10)
+	strike, ok2 := new(big.Int).SetString(t.Strike, 10)
+	if !ok1 || !ok2 {
+		return "-"
+	}
+
+	cmp := market.Cmp(strike)
+	if t.IsPut {
+		// Put: ITM when market < strike
+		if cmp < 0 {
+			return "ITM"
+		}
+		return "OTM"
+	}
+	// Call: ITM when market > strike
+	if cmp > 0 {
+		return "ITM"
+	}
+	return "OTM"
+}
+
+func shortenAddr(addr string) string {
+	if len(addr) <= 10 {
+		return addr
+	}
+	return addr[:6] + "..." + addr[len(addr)-4:]
+}
+
+func formatBigNum(val string, decimals uint8) string {
+	if val == "" {
+		return "-"
+	}
+
+	n, ok := new(big.Int).SetString(val, 10)
+	if !ok {
+		return val
+	}
+
+	if decimals == 0 {
+		decimals = 18
+	}
+
+	d := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	whole := new(big.Int).Div(n, d)
+	frac := new(big.Int).Mod(n, d)
+	if frac.Sign() < 0 {
+		frac.Abs(frac)
+	}
+
+	// Show up to 4 decimal places
+	shift := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)-4), nil)
+	if shift.Sign() > 0 {
+		frac.Div(frac, shift)
+	}
+
+	fracStr := fmt.Sprintf("%04d", frac.Int64())
+	// Trim trailing zeros
+	fracStr = strings.TrimRight(fracStr, "0")
+	if fracStr == "" {
+		return whole.String()
+	}
+
+	if n.Sign() < 0 && whole.Sign() == 0 {
+		return fmt.Sprintf("-%s.%s", whole, fracStr)
+	}
+	return fmt.Sprintf("%s.%s", whole, fracStr)
+}
+
+func formatExpiry(ts int) string {
+	if ts == 0 {
+		return "-"
+	}
+	t := time.Unix(int64(ts), 0).UTC()
+	return t.Format("02 Jan 2006")
+}
+
+// EnrichTrades resolves asset metadata, filters out settled positions,
+// and sorts by most recent first.
+func EnrichTrades(trades []model.Trade, assets map[int][]*model.AssetsResponse) []model.EnrichedTrade {
+	var result []model.EnrichedTrade
+	for _, t := range trades {
+		if strings.EqualFold(t.Status, "settled") {
+			continue
+		}
+
+		e := model.EnrichedTrade{Trade: t}
+		a := caps.FindAssetByAddress(assets, t.Address)
+		if a != nil {
+			e.AssetSymbol = a.Symbol
+			e.Underlying = a.Underlying
+			e.MarketPrice = a.Price
+		}
+
+		// Resolve collateral symbol if it looks like an address
+		if strings.HasPrefix(t.Collateral, "0x") && len(t.Collateral) == 42 {
+			if c := caps.FindAssetByAddress(assets, t.Collateral); c != nil {
+				e.CollateralSymbol = c.Symbol
+			}
+		}
+
+		result = append(result, e)
+	}
+
+	// Sort by most recent first
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt > result[j].CreatedAt
+	})
+
+	return result
 }
 
 func EscMD(s string) string {

@@ -3,6 +3,7 @@ package telegram
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"v12-handy-cap-bot/model"
 )
@@ -422,5 +423,268 @@ func TestFormatFreedCaps_InactiveAssetExcluded(t *testing.T) {
 	}
 	if strings.Contains(result, "XHYPE") {
 		t.Error("inactive XHYPE should be excluded")
+	}
+}
+
+// --- FormatPositions ---
+
+func TestFormatPositions_Empty(t *testing.T) {
+	result := FormatPositions("0x1234567890abcdef1234567890abcdef12345678", nil)
+	if !strings.Contains(result, "No positions") {
+		t.Error("expected no positions message")
+	}
+}
+
+func TestFormatPositions_Basic(t *testing.T) {
+	expiry := int(time.Date(2026, 4, 1, 8, 0, 0, 0, time.UTC).Unix())
+	trades := []model.EnrichedTrade{
+		{
+			Trade: model.Trade{
+				Address:  testAsset.Address,
+				IsBuy:    true,
+				IsPut:    false,
+				Quantity: "1000000000000000000",
+				Strike:   "3000000000000000000000",
+				Price:    "50000000000000000",
+				Expiry:   expiry,
+				Status:   "OPEN",
+				Symbol:   "UETH",
+				Premium:  "50000000000000000",
+				APR:      "12.5%",
+			},
+			AssetSymbol:      "UETH",
+			Underlying:       "ETH",
+			CollateralSymbol: "USDC",
+			MarketPrice:      "2500000000000000000000",
+
+		},
+	}
+
+	result := FormatPositions("0x1234567890abcdef1234567890abcdef12345678", trades)
+
+	if !strings.Contains(result, "Positions") {
+		t.Error("expected header")
+	}
+	// Header: UETH/USDC(ETH)
+	if !strings.Contains(result, "UETH") {
+		t.Error("expected UETH in pair header")
+	}
+	if !strings.Contains(result, "USDC") {
+		t.Error("expected USDC in pair header")
+	}
+	if !strings.Contains(result, "ETH") {
+		t.Error("expected ETH underlying in pair header")
+	}
+	if !strings.Contains(result, "Call") {
+		t.Error("expected Call type")
+	}
+	if !strings.Contains(result, "Strike") {
+		t.Error("expected strike line")
+	}
+	if !strings.Contains(result, "Price") {
+		t.Error("expected price line")
+	}
+	if !strings.Contains(result, "Premium") {
+		t.Error("expected premium line")
+	}
+	if !strings.Contains(result, "12.5%") {
+		t.Error("expected APR")
+	}
+	if !strings.Contains(result, "open") {
+		t.Error("expected status open")
+	}
+	if !strings.Contains(result, "OTM") {
+		t.Error("expected OTM (market 2500 < strike 3000)")
+	}
+	if !strings.Contains(result, "01 Apr 2026") {
+		t.Error("expected formatted expiry")
+	}
+}
+
+func TestFormatPositions_PutITM(t *testing.T) {
+	trades := []model.EnrichedTrade{
+		{
+			Trade: model.Trade{
+				IsBuy:    false,
+				IsPut:    true,
+				Quantity: "500000000000000000",
+				Strike:   "3000000000000000000000",
+				Price:    "100000000000000000",
+				Status:   "OPEN",
+				Premium:  "100000000000000000",
+			},
+			AssetSymbol: "UBTC",
+			Underlying:  "BTC",
+			MarketPrice: "2000000000000000000000",
+		},
+	}
+
+	result := FormatPositions("0x1234567890abcdef1234567890abcdef12345678", trades)
+
+	if !strings.Contains(result, "Put") {
+		t.Error("expected Put type")
+	}
+	if !strings.Contains(result, "ITM") {
+		t.Error("expected ITM (put, market 2000 < strike 3000)")
+	}
+}
+
+func TestFormatPositions_DefaultCollateral(t *testing.T) {
+	trades := []model.EnrichedTrade{
+		{
+			Trade: model.Trade{
+				Status: "OPEN",
+			},
+			AssetSymbol: "UETH",
+			Underlying:  "ETH",
+		},
+	}
+
+	result := FormatPositions("0x1234567890abcdef1234567890abcdef12345678", trades)
+	// Should default to USDC when CollateralSymbol is empty
+	if !strings.Contains(result, "USDC") {
+		t.Error("expected default USDC collateral")
+	}
+}
+
+// --- formatBigNum ---
+
+func TestFormatBigNum(t *testing.T) {
+	tests := []struct {
+		val      string
+		decimals uint8
+		expected string
+	}{
+		{"1000000000000000000", 18, "1"},
+		{"1500000000000000000", 18, "1.5"},
+		{"50000000000000000", 18, "0.05"},
+		{"3000000000000000000000", 18, "3000"},
+		{"", 18, "-"},
+		{"not_a_number", 18, "not_a_number"},
+	}
+	for _, tt := range tests {
+		got := formatBigNum(tt.val, tt.decimals)
+		if got != tt.expected {
+			t.Errorf("formatBigNum(%q, %d) = %q, want %q", tt.val, tt.decimals, got, tt.expected)
+		}
+	}
+}
+
+func TestFormatBigNum_DefaultDecimals(t *testing.T) {
+	// When decimals is 0, should default to 18
+	got := formatBigNum("1000000000000000000", 18)
+	if got != "1" {
+		t.Errorf("expected 1, got %q", got)
+	}
+}
+
+// --- EnrichTrades ---
+
+func TestEnrichTrades(t *testing.T) {
+	assets := map[int][]*model.AssetsResponse{999: {testAsset}}
+	trades := []model.Trade{
+		{Address: testAsset.Address, Symbol: "UETH", Status: "OPEN"},
+		{Address: "0xunknown0000000000000000000000000000000000", Symbol: "???", Status: "OPEN"},
+	}
+
+	enriched := EnrichTrades(trades, assets)
+
+	if len(enriched) != 2 {
+		t.Fatalf("expected 2, got %d", len(enriched))
+	}
+	if enriched[0].AssetSymbol != "UETH" {
+		t.Errorf("expected UETH, got %s", enriched[0].AssetSymbol)
+	}
+	if enriched[0].MarketPrice != testAsset.Price {
+		t.Error("expected market price from asset")
+	}
+	if enriched[1].AssetSymbol != "" {
+		t.Error("unknown address should have empty asset symbol")
+	}
+}
+
+// --- shortenAddr ---
+
+func TestShortenAddr(t *testing.T) {
+	got := shortenAddr("0x1234567890abcdef1234567890abcdef12345678")
+	if !strings.Contains(got, "0x1234") {
+		t.Error("expected prefix")
+	}
+	if !strings.Contains(got, "5678") {
+		t.Error("expected suffix")
+	}
+}
+
+func TestShortenAddr_Short(t *testing.T) {
+	got := shortenAddr("0x1234")
+	if got != "0x1234" {
+		t.Errorf("short address should not be shortened, got %q", got)
+	}
+}
+
+// --- formatExpiry ---
+
+func TestFormatExpiry(t *testing.T) {
+	ts := int(time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC).Unix())
+	got := formatExpiry(ts)
+	if got != "15 Mar 2026" {
+		t.Errorf("expected '15 Mar 2026', got %q", got)
+	}
+}
+
+func TestFormatExpiry_Zero(t *testing.T) {
+	if got := formatExpiry(0); got != "-" {
+		t.Errorf("expected '-', got %q", got)
+	}
+}
+
+// --- computeOutcome ---
+
+func TestComputeOutcome_CallITM(t *testing.T) {
+	e := model.EnrichedTrade{
+		Trade:       model.Trade{IsPut: false, Strike: "3000000000000000000000"},
+		MarketPrice: "3500000000000000000000",
+	}
+	if got := computeOutcome(e); got != "ITM" {
+		t.Errorf("expected ITM, got %s", got)
+	}
+}
+
+func TestComputeOutcome_CallOTM(t *testing.T) {
+	e := model.EnrichedTrade{
+		Trade:       model.Trade{IsPut: false, Strike: "3000000000000000000000"},
+		MarketPrice: "2500000000000000000000",
+	}
+	if got := computeOutcome(e); got != "OTM" {
+		t.Errorf("expected OTM, got %s", got)
+	}
+}
+
+func TestComputeOutcome_PutITM(t *testing.T) {
+	e := model.EnrichedTrade{
+		Trade:       model.Trade{IsPut: true, Strike: "3000000000000000000000"},
+		MarketPrice: "2500000000000000000000",
+	}
+	if got := computeOutcome(e); got != "ITM" {
+		t.Errorf("expected ITM, got %s", got)
+	}
+}
+
+func TestComputeOutcome_PutOTM(t *testing.T) {
+	e := model.EnrichedTrade{
+		Trade:       model.Trade{IsPut: true, Strike: "3000000000000000000000"},
+		MarketPrice: "3500000000000000000000",
+	}
+	if got := computeOutcome(e); got != "OTM" {
+		t.Errorf("expected OTM, got %s", got)
+	}
+}
+
+func TestComputeOutcome_NoMarketPrice(t *testing.T) {
+	e := model.EnrichedTrade{
+		Trade: model.Trade{Strike: "3000000000000000000000"},
+	}
+	if got := computeOutcome(e); got != "-" {
+		t.Errorf("expected -, got %s", got)
 	}
 }

@@ -97,13 +97,31 @@ func main() {
 		return telegram.FormatSingleCapRatio(name, ratios)
 	})
 
-	go tg.ListenForUpdates()
-
 	// --- WebSocket ---
 	ws, err := rpc.NewWSClient(wsURL)
 	if err != nil {
 		log.Fatalf("websocket: %v", err)
 	}
+
+	// --- /positions command handler ---
+	tg.SetPositionsHandler(func(address string) string {
+		trades, err := ws.FetchPositions(address)
+		if err != nil {
+			log.Printf("fetch positions: %v", err)
+			return "Error fetching positions"
+		}
+		log.Printf("positions for %s: %d from RPC", address, len(trades))
+
+		mu.RLock()
+		assets := latestAssets
+		mu.RUnlock()
+
+		enriched := telegram.EnrichTrades(trades, assets)
+		log.Printf("positions for %s: %d after enrichment (filtered settled)", address, len(enriched))
+		return telegram.FormatPositions(address, enriched)
+	})
+
+	go tg.ListenForUpdates()
 
 	// --- Poll loop ---
 	ticker := time.NewTicker(time.Duration(pollSec) * time.Second)
